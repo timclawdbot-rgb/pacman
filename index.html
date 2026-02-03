@@ -117,7 +117,28 @@
       if (grid[y][x] === 'P') pac = {x,y};
       if (grid[y][x] === 'G') ghosts.push({x,y});
     }
-    if (!pac) pac = {x: 13, y: 23};
+    if (!pac) pac = {x: 13, y: 22};
+
+    // If the level only provides 1-2 ghost spawns, create more nearby so they don't stack.
+    if (ghosts.length && ghosts.length < 4) {
+      const base = ghosts[0];
+      const candidates = [
+        {x: base.x-1, y: base.y},
+        {x: base.x+1, y: base.y},
+        {x: base.x, y: base.y+1},
+        {x: base.x, y: base.y-1},
+        {x: base.x-1, y: base.y+1},
+        {x: base.x+1, y: base.y+1},
+      ];
+      for (const c of candidates) {
+        if (ghosts.length >= 4) break;
+        if (c.x < 0 || c.x >= COLS || c.y < 0 || c.y >= ROWS) continue;
+        if (isWall(c.x, c.y)) continue;
+        if (ghosts.some(g => g.x === c.x && g.y === c.y)) continue;
+        ghosts.push(c);
+      }
+    }
+
     return { pac, ghosts };
   }
 
@@ -143,12 +164,13 @@
     };
   }
 
-  function newGhost(spawn, color) {
+  function newGhost(spawn, color, i=0) {
     const c = tileCenter(spawn.x, spawn.y);
+    const dirs0 = [{x:0,y:-1},{x:1,y:0},{x:-1,y:0},{x:0,y:1}];
     return {
       x: c.x,
       y: c.y,
-      dir: {x:0,y:-1},
+      dir: dirs0[i % dirs0.length],
       speed: 2.0,
       color,
       frightened: 0,
@@ -175,7 +197,7 @@
 
     const sp = findSpawns();
     pacman = newPacman(sp.pac);
-    ghosts = sp.ghosts.map((g,i) => newGhost(g, ghostColors[i % ghostColors.length]));
+    ghosts = sp.ghosts.map((g,i) => newGhost(g, ghostColors[i % ghostColors.length], i));
     score = 0;
     lives = 3;
     pelletsLeft = countPellets();
@@ -186,7 +208,7 @@
   function resetRound() {
     const sp = findSpawns();
     pacman = newPacman(sp.pac);
-    ghosts = sp.ghosts.map((g,i) => newGhost(g, ghostColors[i % ghostColors.length]));
+    ghosts = sp.ghosts.map((g,i) => newGhost(g, ghostColors[i % ghostColors.length], i));
   }
 
   function keyDir() {
@@ -196,32 +218,36 @@
     return null;
   }
 
+  function tileFromPos(px, py) {
+    // Positions are stored as tile-centers; rounding is more stable than floor
+    // and avoids getting stuck between tiles due to float drift.
+    const cx = Math.round((px - TILE/2) / TILE);
+    const cy = Math.round((py - TILE/2) / TILE);
+    return {cx, cy};
+  }
+
   function canMove(px, py, dir) {
-    const cx = Math.floor(px / TILE);
-    const cy = Math.floor(py / TILE);
+    const {cx, cy} = tileFromPos(px, py);
     const nx = cx + dir.x;
     const ny = cy + dir.y;
     return !isWall(nx, ny);
   }
 
   function atCenter(px, py) {
-    const cx = Math.floor(px / TILE);
-    const cy = Math.floor(py / TILE);
+    const {cx, cy} = tileFromPos(px, py);
     const c = tileCenter(cx, cy);
-    return Math.abs(px - c.x) < 1.2 && Math.abs(py - c.y) < 1.2;
+    return Math.abs(px - c.x) < 1.5 && Math.abs(py - c.y) < 1.5;
   }
 
   function snapToCenter(ent) {
-    const cx = Math.floor(ent.x / TILE);
-    const cy = Math.floor(ent.y / TILE);
+    const {cx, cy} = tileFromPos(ent.x, ent.y);
     const c = tileCenter(cx, cy);
     ent.x = c.x;
     ent.y = c.y;
   }
 
   function eatPellet() {
-    const cx = Math.floor(pacman.x / TILE);
-    const cy = Math.floor(pacman.y / TILE);
+    const {cx, cy} = tileFromPos(pacman.x, pacman.y);
     const t = grid[cy]?.[cx];
     if (t === '.' || t === 'o') {
       grid[cy][cx] = ' ';
@@ -246,25 +272,34 @@
     const d = keyDir();
     if (d) pacman.wish = d;
 
-    // attempt turn only when near center
+    // If we're blocked but not centered, snap back to the current tile center
+    // so the player can turn instead of getting stuck.
+    if (!canMove(pacman.x, pacman.y, pacman.dir) && !atCenter(pacman.x, pacman.y)) {
+      snapToCenter(pacman);
+    }
+
+    // attempt turn when near center
     if (atCenter(pacman.x, pacman.y)) {
       snapToCenter(pacman);
       if (canMove(pacman.x, pacman.y, pacman.wish)) pacman.dir = {...pacman.wish};
-      // stop if blocked
+      // If still blocked, stop (stay on tile center)
       if (!canMove(pacman.x, pacman.y, pacman.dir)) {
-        // don't move
+        pacman.dir = {x:0,y:0};
       }
     }
 
-    // move
-    if (canMove(pacman.x, pacman.y, pacman.dir)) {
+    // move (only if dir is non-zero)
+    if ((pacman.dir.x || pacman.dir.y) && canMove(pacman.x, pacman.y, pacman.dir)) {
       pacman.x += pacman.dir.x * pacman.speed;
       pacman.y += pacman.dir.y * pacman.speed;
     }
 
-    // wrap tunnel (left/right on row 14-ish)
+    // wrap tunnel (left/right)
     if (pacman.x < -TILE/2) pacman.x = COLS*TILE + TILE/2;
     if (pacman.x > COLS*TILE + TILE/2) pacman.x = -TILE/2;
+
+    // re-snap when we arrive at a new tile center (prevents float drift)
+    if (atCenter(pacman.x, pacman.y)) snapToCenter(pacman);
 
     pacman.mouth += 0.18;
     eatPellet();
@@ -315,23 +350,31 @@
   function updateGhost(g) {
     if (g.frightened > 0) g.frightened--;
 
+    // If blocked off-center, snap so it can turn.
+    if (!canMove(g.x, g.y, g.dir) && !atCenter(g.x, g.y)) {
+      snapToCenter(g);
+    }
+
     // turn at centers
     if (atCenter(g.x, g.y)) {
       snapToCenter(g);
       chooseGhostDir(g);
+      // if somehow still blocked, allow reverse
+      if (!canMove(g.x, g.y, g.dir)) {
+        g.dir = {x:-g.dir.x, y:-g.dir.y};
+      }
     }
 
     const speed = g.frightened > 0 ? 1.6 : g.speed;
-    // move
-    const cx = Math.floor(g.x / TILE);
-    const cy = Math.floor(g.y / TILE);
-    if (!isWall(cx + g.dir.x, cy + g.dir.y)) {
+    if (canMove(g.x, g.y, g.dir)) {
       g.x += g.dir.x * speed;
       g.y += g.dir.y * speed;
     }
 
     if (g.x < -TILE/2) g.x = COLS*TILE + TILE/2;
     if (g.x > COLS*TILE + TILE/2) g.x = -TILE/2;
+
+    if (atCenter(g.x, g.y)) snapToCenter(g);
   }
 
   function handleCollisions() {
